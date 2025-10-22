@@ -7,7 +7,6 @@ import java.util.*;
 
 public class WhiteboardServer 
 {
-    private static final int PORT = 5001;
     private static final Set<PrintWriter> clients = Collections.synchronizedSet(new HashSet<>());
     static List<String> messageLog = new ArrayList<>();
     public static void addToMessageLog(String message) {
@@ -21,8 +20,18 @@ public class WhiteboardServer
     private static long sequenceNumber = 0;
     // time to implement first clock synchronization
     public static void main(String[] args) {
-        System.out.println("Whiteboard Server starting on port " + PORT + "...");
-        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
+        int port;
+        if(args.length>0)
+        {
+            port = Integer.parseInt(args[0]);
+        }
+        else
+        {  
+            port=5001;
+            System.out.println("No port specified. Using default port 5001.");
+        }
+        System.out.println("Whiteboard Server starting on port " + port + "...");
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
             while (true) {
                 Socket socket = serverSocket.accept();
                 System.out.println("Client connected: " + socket.getRemoteSocketAddress());

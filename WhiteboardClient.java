@@ -14,51 +14,108 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.StringTokenizer;
+import java.util.Arrays;
 
 public class WhiteboardClient {
-    private static final String DEFAULT_HOST = "localhost";
+    private static final String DEFAULT_HOST = "localhost"; // basically the ip address
     private static final int DEFAULT_PORT = 5001;
-
-    public static void main(String[] args) throws Exception {
+    private static final List<Integer> PORTS_LIST= new ArrayList<>(Arrays.asList(5001, 5002, 5003));
+    public static void main(String[] args) throws Exception 
+    {
         String host = args.length > 0 ? args[0] : DEFAULT_HOST;
-        int port = args.length > 1 ? Integer.parseInt(args[1]) : DEFAULT_PORT;
-        new WhiteboardClient().start(host, port);
+        // try to connect to specified port in the arguments passed , if fails try other ports from the list
+        // start the client
+        new WhiteboardClient().start(PORTS_LIST);
     }
 
-    private void start(String host, int port) throws Exception {
-        Socket socket = new Socket(host, port);
-        System.out.println("Connected to server " + host + ":" + port);
-
-        BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()), true);
-
-        UUID clientId = UUID.randomUUID();
-        JFrame frame = new JFrame("Collaborative Whiteboard - " + clientId.toString().substring(0, 8));
-        WhiteboardPanel panel = new WhiteboardPanel(out, clientId);
-
-        // Reader thread to apply remote draw commands
-        Thread reader = new Thread(() -> {
-            String line;
-            try {
-                while ((line = in.readLine()) != null) {
-                    if (line.startsWith("DRAW ")) {
+    private void start(List<Integer> PORTS_LIST) throws Exception 
+    {
+        while(true)
+        {
+            Socket socket = null;
+            JFrame frame = null;
+            for(int port: PORTS_LIST)
+            {
+                try
+                {
+                    String host = DEFAULT_HOST;
+                    System.out.println("Trying to connect to server at " + host + ":" + port + "...");
+                    socket = new Socket(host, port);
+                    System.out.println("Connected to server at " + host + ":" + port + ".");
+                    break;
+                }
+                catch(IOException e)
+                {
+                    System.out.println("Could not connect to port "+ port +", Trying next port. "+ e.getMessage());
+                    socket = null;
+                }
+                catch(Exception e)
+                {
+                    System.out.println("Unexpected error: "+ e.getMessage());
+                }
+            }
+            if(socket==null)
+            {
+                System.out.println("All connection attempts failed. Retrying in 5 seconds...");
+                Thread.sleep(5000);
+                continue;
+            }
+            // if connection successful, launch the whiteboard UI
+            try
+            {
+                BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()), true);
+                UUID clientId = UUID.randomUUID();
+                WhiteboardPanel panel = new WhiteboardPanel(out, clientId);
+                frame = new JFrame("Collaborative Whiteboard - Client " + clientId);
+                Thread reader = new Thread(() -> 
+                {
+                try {
+                    String line;
+                     while ((line = in.readLine()) != null) {
                         panel.applyRemoteDraw(line);
+                        }
+                    } 
+                    catch (IOException ex) {// Connection lost
+                        System.out.println("Connection lost: " + ex.getMessage());
+                    }
+                });
+                reader.setDaemon(true);
+                reader.start();
+                frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+                frame.setLayout(new BorderLayout());
+                frame.add(toolbar(panel), BorderLayout.NORTH);
+                frame.add(panel, BorderLayout.CENTER);
+                frame.setSize(1000, 700);
+                frame.setLocationRelativeTo(null);
+                frame.setVisible(true);
+                reader.join();
+
+            }
+            catch(Exception e)
+            {
+                e.printStackTrace();
+            }
+            finally
+            {
+                // -- Clean up on disconnect
+                if(frame!=null)
+                {
+                    frame.setVisible(false);
+                    frame.dispose();
+                }
+                try
+                {
+                    if(socket!=null)
+                    {
+                        socket.close();
                     }
                 }
-            } catch (IOException ex) {
-                System.out.println("Connection closed.");
+                catch(IOException ignored){}
+                System.out.println("Disconnected, retrying connection...");
             }
-        });
-        reader.setDaemon(true);
-        reader.start();
-
-        frame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
-        frame.setLayout(new BorderLayout());
-        frame.add(toolbar(panel), BorderLayout.NORTH);
-        frame.add(panel, BorderLayout.CENTER);
-        frame.setSize(1000, 700);
-        frame.setLocationRelativeTo(null);
-        frame.setVisible(true);
+            
+    }
     }
 
     private JComponent toolbar(WhiteboardPanel panel) {
