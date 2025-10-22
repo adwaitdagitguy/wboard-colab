@@ -30,10 +30,20 @@ public class WhiteboardClient {
 
     private void start(List<Integer> PORTS_LIST) throws Exception 
     {
+        UUID clientId = UUID.randomUUID();
+        JFrame frame = new JFrame("Collaborative Whiteboard - Client " + clientId);
+        WhiteboardPanel panel = new WhiteboardPanel(clientId);
+        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        frame.setLayout(new BorderLayout());
+        frame.add(toolbar(panel), BorderLayout.NORTH);
+        frame.add(panel, BorderLayout.CENTER);
+        frame.setSize(1000, 700);
+        frame.setLocationRelativeTo(null);
+        frame.setVisible(true);
+
         while(true)
         {
             Socket socket = null;
-            JFrame frame = null;
             for(int port: PORTS_LIST)
             {
                 try
@@ -65,9 +75,8 @@ public class WhiteboardClient {
             {
                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                 PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()), true);
-                UUID clientId = UUID.randomUUID();
-                WhiteboardPanel panel = new WhiteboardPanel(out, clientId);
-                frame = new JFrame("Collaborative Whiteboard - Client " + clientId);
+                panel.setPrintWriter(out);
+                frame.setTitle("Collaborative Whiteboard - Client " + clientId + " (Connected to " + socket.getRemoteSocketAddress() + ")");
                 Thread reader = new Thread(() -> 
                 {
                 try {
@@ -82,13 +91,6 @@ public class WhiteboardClient {
                 });
                 reader.setDaemon(true);
                 reader.start();
-                frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-                frame.setLayout(new BorderLayout());
-                frame.add(toolbar(panel), BorderLayout.NORTH);
-                frame.add(panel, BorderLayout.CENTER);
-                frame.setSize(1000, 700);
-                frame.setLocationRelativeTo(null);
-                frame.setVisible(true);
                 reader.join();
 
             }
@@ -99,11 +101,7 @@ public class WhiteboardClient {
             finally
             {
                 // -- Clean up on disconnect
-                if(frame!=null)
-                {
-                    frame.setVisible(false);
-                    frame.dispose();
-                }
+                panel.setPrintWriter(null);
                 try
                 {
                     if(socket!=null)
@@ -148,14 +146,13 @@ public class WhiteboardClient {
     // ================= Whiteboard Panel =================
     static class WhiteboardPanel extends JPanel {
         private final List<DrawCommand> commands = new ArrayList<>();
-        private final PrintWriter out;
+        private volatile PrintWriter out;
         private final UUID clientId;
         private Point last;
         private Color drawColor = Color.BLACK;
         private float strokeWidth = 3f;
 
-        WhiteboardPanel(PrintWriter out, UUID clientId) {
-            this.out = out;
+        WhiteboardPanel(UUID clientId) {
             this.clientId = clientId;
             setBackground(Color.WHITE);
 
@@ -183,7 +180,9 @@ public class WhiteboardClient {
             addMouseListener(adapter);
             addMouseMotionListener(adapter);
         }
-
+        void setPrintWriter(PrintWriter out) {
+            this.out = out;
+        }
         void setDrawColor(Color c) { this.drawColor = c; }
         Color getDrawColor() { return drawColor; }
         void setStrokeWidth(float w) { this.strokeWidth = w; }
@@ -200,10 +199,20 @@ public class WhiteboardClient {
 
         private void sendSegment(Point a, Point b, Color color, float stroke) {
             // Message format: DRAW <clientId> <x1> <y1> <x2> <y2> <r> <g> <b> <stroke>
+            PrintWriter currentOut = this.out;
+            if(currentOut!=null){
             String msg = String.format("DRAW %s %d %d %d %d %d %d %d %.2f",
                     clientId, a.x, a.y, b.x, b.y,
                     color.getRed(), color.getGreen(), color.getBlue(), stroke);
             out.println(msg);
+            }
+            else
+            {
+                // ADD buffering or notification can be implemented here
+                System.out.println("OFFLINE.");
+                // store all messages in a buffer to send later
+
+            }
         }
 
         void applyRemoteDraw(String line) {
