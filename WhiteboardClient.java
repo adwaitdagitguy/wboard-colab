@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.StringTokenizer;
 import java.util.Arrays;
+import java.util.Collections;
 
 public class WhiteboardClient {
     private static final String DEFAULT_HOST = "localhost"; // basically the ip address
@@ -79,6 +80,9 @@ public class WhiteboardClient {
                 PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()), true);
                 panel.setPrintWriter(out);
                 out.println("IAM:CLIENT");
+                // Flush any offline buffered drawings
+                panel.flushOfflineBuffer(out);
+                // end of flushing
                 frame.setTitle("Collaborative Whiteboard - Client " + clientId + " (Connected to " + socket.getRemoteSocketAddress() + ")");
                 Thread reader = new Thread(() -> 
                 {
@@ -149,6 +153,7 @@ public class WhiteboardClient {
     // ================= Whiteboard Panel =================
     static class WhiteboardPanel extends JPanel {
         private final List<DrawCommand> commands = new ArrayList<>();
+        private final List<String> offlineBuffer = Collections.synchronizedList(new ArrayList<>());
         private volatile PrintWriter out;
         private final UUID clientId;
         private Point last;
@@ -203,16 +208,19 @@ public class WhiteboardClient {
         private void sendSegment(Point a, Point b, Color color, float stroke) {
             // Message format: DRAW <clientId> <x1> <y1> <x2> <y2> <r> <g> <b> <stroke>
             PrintWriter currentOut = this.out;
-            if(currentOut!=null){
             String msg = String.format("DRAW %s %d %d %d %d %d %d %d %.2f",
                     clientId, a.x, a.y, b.x, b.y,
                     color.getRed(), color.getGreen(), color.getBlue(), stroke);
-            out.println(msg);
+            if(currentOut!=null)
+            {
+                out.println(msg);
+                // if connected, send immediately
             }
             else
             {
-                // ADD buffering or notification can be implemented here
-                System.out.println("OFFLINE.");
+                // if offline, buffer the message
+                System.out.println("OFFLINE. Buffering: " + msg);
+                offlineBuffer.add(msg);
                 // store all messages in a buffer to send later
 
             }
@@ -255,6 +263,20 @@ public class WhiteboardClient {
                 g2.draw(new Line2D.Float(c.x1, c.y1, c.x2, c.y2));
             }
             g2.dispose();
+        }
+
+        void flushOfflineBuffer(PrintWriter out) {
+            // Synchronize on the buffer to safely iterate and clear
+            synchronized (offlineBuffer) {
+                if (!offlineBuffer.isEmpty()) {
+                    System.out.println("Re-syncing " + offlineBuffer.size() + " offline drawings...");
+                    for (String msg : offlineBuffer) {
+                        out.println(msg); // Send each buffered message
+                    }
+                    offlineBuffer.clear(); // Clear the buffer
+                    System.out.println("Re-sync complete.");
+                }
+            }
         }
     }
 
