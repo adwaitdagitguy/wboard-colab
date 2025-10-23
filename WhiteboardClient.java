@@ -20,6 +20,8 @@ public class WhiteboardClient {
     private static final String DEFAULT_HOST = "localhost"; // basically the ip address
     private static final int DEFAULT_PORT = 5001;
     private static final List<Integer> PORTS_LIST= new ArrayList<>(Arrays.asList(5001, 5002, 5003));
+
+    
     public static void main(String[] args) throws Exception 
     {
         String host = args.length > 0 ? args[0] : DEFAULT_HOST;
@@ -76,6 +78,7 @@ public class WhiteboardClient {
                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                 PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()), true);
                 panel.setPrintWriter(out);
+                out.println("IAM:CLIENT");
                 frame.setTitle("Collaborative Whiteboard - Client " + clientId + " (Connected to " + socket.getRemoteSocketAddress() + ")");
                 Thread reader = new Thread(() -> 
                 {
