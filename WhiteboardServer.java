@@ -1,24 +1,21 @@
-// The server does not interpret messages; it simply relays them to all clients.
-// ================================================
-
 import java.io.*;
 import java.net.*;
 import java.util.*;
 
 public class WhiteboardServer 
 {
-    private static final Set<PrintWriter> clients = Collections.synchronizedSet(new HashSet<>());
-    static List<String> messageLog = new ArrayList<>();
-    public static void addToMessageLog(String message) {
-        messageLog.add(message);
-    }
+    // CHANGED: Renamed 'clients' to 'clientWriters' for clarity
+    private static final Set<PrintWriter> clientWriters = Collections.synchronizedSet(new HashSet<>());
     
-    public static List<String> getMessageLog()
-    {
-        return messageLog;
-    }
+    // CHANGED: Made the log 'final' and synchronized on it directly
+    private static final List<String> messageLog = Collections.synchronizedList(new ArrayList<>());
+    
+    // We don't need these helper methods anymore
+    // public static void addToMessageLog(String message) ...
+    // public static List<String> getMessageLog() ...
+
     private static long sequenceNumber = 0;
-    // time to implement first clock synchronization
+
     public static void main(String[] args) {
         int port;
         if(args.length>0)
@@ -31,66 +28,98 @@ public class WhiteboardServer
             System.out.println("No port specified. Using default port 5001.");
         }
         System.out.println("Whiteboard Server starting on port " + port + "...");
+        
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             while (true) {
                 Socket socket = serverSocket.accept();
-                System.out.println("Client connected: " + socket.getRemoteSocketAddress());
-                Thread t = new Thread(new ClientHandler(socket));
-                t.setDaemon(true);
-                t.start();
+                
+                // NEW: Add handshake logic to identify connection type
+                try {
+                    BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                    String handshake = in.readLine();
+                    
+                    if ("IAM:CLIENT".equals(handshake)) {
+                        System.out.println("Client connected: " + socket.getRemoteSocketAddress());
+                        // CHANGED: Pass the 'in' reader to the handler so the handshake line isn't lost
+                        Thread t = new Thread(new ClientHandler(socket, in));
+                        t.setDaemon(true);
+                        t.start();
+                    } else {
+                        // In the future, we'll check for "IAM:SERVER" here
+                        System.out.println("Unknown connection type. Closing: " + socket.getRemoteSocketAddress());
+                        socket.close();
+                    }
+                } catch (IOException e) {
+                    System.out.println("Handshake failed: " + e.getMessage());
+                    if (socket != null && !socket.isClosed()) {
+                        socket.close();
+                    }
+                }
             }
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
+    // CHANGED: This is now the Client Handler
     private static class ClientHandler implements Runnable 
     {
         private final Socket socket;
         private PrintWriter out;
-        private BufferedReader in;
+        private final BufferedReader in; // CHANGED: 'in' is now final and passed in constructor
 
-        ClientHandler(Socket socket) {
+        // CHANGED: Constructor now accepts the BufferedReader
+        ClientHandler(Socket socket, BufferedReader in) {
             this.socket = socket;
+            this.in = in; // It was created and used in main() for the handshake
         }
 
         @Override
-        // whenever the client joins for the first time , this thread is created
         public void run() {
             try {
-                in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                // CHANGED: 'in' is already created
                 out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()), true);
-                // replay the message history to the newly connected client
+                
+                // Replay the message history to the newly connected client
                 synchronized(messageLog)
                 {
-                    for(String ms: getMessageLog())
+                    for(String msg: messageLog)
                     {
-                        out.println(ms);
+                        out.println(msg);
                     }
                 }
                 
-                // now start broadcasting new messages to all clients
-                clients.add(out);
+                // Add this client's writer to the broadcast list
+                clientWriters.add(out);
 
                 String line;
                 while ((line = in.readLine()) != null) 
                 {
-                    // Broadcast to all clients
-                    synchronized (clients) {
-                        for (PrintWriter pw : clients) 
+                    // --- BEGIN BUG FIX ---
+                    // The logic is now split: log ONCE, then broadcast.
+                    
+                    // Step 1: Log the message. This happens only once.
+                    synchronized (messageLog) {
+                        sequenceNumber++;
+                        messageLog.add(line);
+                        System.out.println("Seq: "+ sequenceNumber +" Relayed: " + line);
+                    }
+
+                    // Step 2: Broadcast to all connected clients.
+                    synchronized (clientWriters) {
+                        for (PrintWriter pw : clientWriters) 
                         {
-                            sequenceNumber++;
-                            WhiteboardServer.addToMessageLog(line);
                             pw.println(line);
-                            System.out.println("Seq: "+ sequenceNumber +" Relayed: " + line);
                         }
                     }
+                    // --- END BUG FIX ---
                 }
             } catch (IOException e) {
                 System.out.println("Client disconnected: " + socket.getRemoteSocketAddress());
             } finally 
             {
-                if (out != null) clients.remove(out);
+                // CHANGED: Use the correct set name
+                if (out != null) clientWriters.remove(out); 
                 try { if (in != null) in.close(); } catch (IOException ignored) {}
                 if (out != null) out.close();
                 try { socket.close(); } catch (IOException ignored) {}
