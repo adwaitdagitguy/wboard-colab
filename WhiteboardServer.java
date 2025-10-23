@@ -1,35 +1,34 @@
 import java.io.*;
 import java.net.*;
-// NEW: For election timers
-// NEW: For timer tasks
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.Timer;
+import java.util.TimerTask;
 
 public class WhiteboardServer 
 {
     private static final Set<PrintWriter> clientWriters = Collections.synchronizedSet(new HashSet<>());
     private static final List<String> messageLog = Collections.synchronizedList(new ArrayList<>());
     private static final Map<String, PrintWriter> peerWriters = new ConcurrentHashMap<>();
-    private static volatile TimerTask currentTimerTask; // NEW: Store the current task
     
-    // --- NEW: Election State Variables ---
+    // --- Election State Variables ---
     private static String myAddress;
-    private static String currentLeaderAddress = null;
+    private static volatile String currentLeaderAddress = null; // volatile: visible to all threads
     private static int totalServers = 0;
     private static int majority = 0;
 
     private static enum State { FOLLOWER, CANDIDATE, LEADER }
     private static volatile State currentState = State.FOLLOWER;
-    private static volatile int currentTerm = 0; // Like a "generation" number
+    private static volatile int currentTerm = 0; 
     private static volatile String votedFor = null;
     private static volatile int voteCount = 0;
 
-    private static final Timer timer = new Timer(); // A single timer for heartbeats or elections
+    private static final Timer timer = new Timer();
+    private static volatile TimerTask currentTimerTask; // To prevent timer bug
     private static final Random rand = new Random();
-    private static final int ELECTION_TIMEOUT_MIN = 5000; // 5 seconds
-    private static final int ELECTION_TIMEOUT_MAX = 10000; // 10 seconds
-    private static final int HEARTBEAT_INTERVAL = 2000; // 2 seconds
-    // --- End of New Variables ---
+    private static final int ELECTION_TIMEOUT_MIN = 5000;
+    private static final int ELECTION_TIMEOUT_MAX = 10000;
+    private static final int HEARTBEAT_INTERVAL = 2000;
 
     private static long sequenceNumber = 0;
 
@@ -44,11 +43,9 @@ public class WhiteboardServer
         myAddress = args[1];
         String[] peerAddresses = args[2].split(",");
 
-        // NEW: Calculate majority
-        totalServers = peerAddresses.length + 1; // Peers + self
+        totalServers = peerAddresses.length + 1;
         majority = (totalServers / 2) + 1;
         System.out.println("Cluster size: " + totalServers + ", Majority needed: " + majority);
-
         System.out.println("Whiteboard Server starting on " + myAddress + " as FOLLOWER.");
 
         for (String peerAddr : peerAddresses) {
@@ -59,7 +56,6 @@ public class WhiteboardServer
             }
         }
         
-        // NEW: Start the election process
         resetElectionTimer();
 
         try (ServerSocket serverSocket = new ServerSocket(port)) {
@@ -77,8 +73,8 @@ public class WhiteboardServer
                         t.setDaemon(true);
                         t.start();
                     } else if (handshake.startsWith("IAM:SERVER:")) {
+                        // Fix for address parsing bug
                         String[] parts = handshake.split(":");
-                        // CHANGED: Re-assemble the full address
                         String peerAddr = parts[2] + ":" + parts[3]; 
                         System.out.println("Peer connected (inbound): " + peerAddr);
                         Thread t = new Thread(new PeerHandler(socket, in, peerAddr));
@@ -98,10 +94,9 @@ public class WhiteboardServer
         }
     }
 
-    // --- Client Handler (No changes from Step 2) ---
-    // Note: This logic is NOT yet consistent. Clients are still writing
-    // to any server, which is wrong. We fix this in the next step.
-    private static class ClientHandler implements Runnable {
+    // --- CHANGED: Client Handler (Now routes commands) ---
+    private static class ClientHandler implements Runnable 
+    {
         private final Socket socket;
         private PrintWriter out;
         private final BufferedReader in;
@@ -114,20 +109,38 @@ public class WhiteboardServer
         public void run() {
             try {
                 out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()), true);
+                
+                // Replay history
                 synchronized(messageLog) {
                     for(String msg: messageLog) out.println(msg);
                 }
+                
+                // Add *after* history replay
                 clientWriters.add(out);
+                
                 String line;
                 while ((line = in.readLine()) != null) {
-                    synchronized (messageLog) {
-                        sequenceNumber++;
-                        messageLog.add(line);
-                        System.out.println("Seq: "+ sequenceNumber +" Relayed: " + line);
+                    
+                    // --- BEGIN CONSISTENCY LOGIC ---
+                    if (currentState == State.LEADER) {
+                        // We are the Leader. This is the official order.
+                        // 1. Log it
+                        logAndRelay(line);
+                        
+                    } else {
+                        // We are a Follower. Forward to the leader.
+                        if (currentLeaderAddress != null) {
+                            PrintWriter leaderWriter = peerWriters.get(currentLeaderAddress);
+                            if (leaderWriter != null) {
+                                // Forward the *exact* DRAW line to the leader
+                                leaderWriter.println(line);
+                            }
+                        } else {
+                            // No leader known, drop the message
+                            System.out.println("Follower: No leader. Dropping: " + line);
+                        }
                     }
-                    synchronized (clientWriters) {
-                        for (PrintWriter pw : clientWriters) pw.println(line);
-                    }
+                    // --- END CONSISTENCY LOGIC ---
                 }
             } catch (IOException e) {
                 System.out.println("Client disconnected: " + socket.getRemoteSocketAddress());
@@ -140,7 +153,7 @@ public class WhiteboardServer
         }
     }
 
-    // --- Peer Connector (No changes from Step 2) ---
+    // --- Peer Connector (Unchanged from Step 3) ---
     private static class PeerConnector implements Runnable {
         private final String peerAddress;
         private final String host;
@@ -163,7 +176,6 @@ public class WhiteboardServer
                     peerWriters.put(peerAddress, out);
                     socket.getInputStream().read(); 
                 } catch (IOException e) {
-                    // System.out.println("Could not connect to peer " + peerAddress + ". Retrying...");
                 } finally {
                     peerWriters.remove(peerAddress);
                 }
@@ -172,7 +184,7 @@ public class WhiteboardServer
         }
     }
 
-    // --- Peer Handler (CHANGED: Now processes election messages) ---
+    // --- Peer Handler (Unchanged from Step 3) ---
     private static class PeerHandler implements Runnable {
         private final Socket socket;
         private final BufferedReader in;
@@ -187,7 +199,6 @@ public class WhiteboardServer
             try {
                 String line;
                 while ((line = in.readLine()) != null) {
-                    // NEW: Process cluster messages
                     handleClusterMessage(line, peerAddress);
                 }
             } catch (IOException e) {
@@ -199,51 +210,62 @@ public class WhiteboardServer
         }
     }
 
-    // --- NEW: Election Logic Methods ---
+    // --- Election Logic (Unchanged from Step 3 + Timer Fix) ---
 
-    /**
-     * The main message router for all server-to-server communication.
-     * This method is synchronized to prevent race conditions when changing state.
-     */
     private static synchronized void handleClusterMessage(String line, String fromAddress) {
+        
+        // --- NEW: Handle replicated DRAW commands ---
+        // A DRAW command looks like "DRAW <uuid> ...", it does not have colons
+        if (line.startsWith("DRAW ")) {
+            // This is a replicated draw command FROM THE LEADER.
+            
+            // 1. Log it to stay in sync
+            synchronized (messageLog) {
+                sequenceNumber++;
+                messageLog.add(line);
+                System.out.println("Replicating: " + line);
+            }
+            
+            // 2. Broadcast to our local clients
+            broadcastToLocalClients(line);
+            return; // Done
+        }
+        // --- End of new logic ---
+
+        // If not DRAW, it must be an election message
         try {
             String[] parts = line.split(":");
             String command = parts[0];
             int term = Integer.parseInt(parts[1]);
-            String senderAddress = parts[2]+":"+parts[3];
+            // Fix for address parsing bug
+            String senderAddress = parts[2] + ":" + parts[3]; 
 
-            // Rule 1: If we receive a message with a higher term,
-            // we are outdated. We must become a follower in that new term.
             if (term > currentTerm) {
-                becomeFollower(term, null); // Step down
+                becomeFollower(term, null);
             }
 
             switch (command) {
                 case "HEARTBEAT":
-                    // Received from a valid leader
                     if (term == currentTerm && currentState != State.LEADER) {
                         currentLeaderAddress = senderAddress;
-                        System.out.println("Heartbeat received from Leader " + senderAddress);
+                        // System.out.println("Heartbeat received from Leader " + senderAddress);
                         resetElectionTimer();
                     }
                     break;
                 
                 case "REQUEST_VOTE":
-                    // A candidate is asking for our vote
                     if (term == currentTerm && (votedFor == null || votedFor.equals(senderAddress))) {
-                        // Grant the vote
                         votedFor = senderAddress;
                         System.out.println("Voting for " + senderAddress + " in term " + term);
                         PrintWriter pw = peerWriters.get(senderAddress);
                         if (pw != null) {
                             pw.println("VOTE_GRANTED:" + currentTerm + ":" + myAddress);
                         }
-                        resetElectionTimer(); // We voted, so we reset our own timer
+                        resetElectionTimer();
                     }
                     break;
 
                 case "VOTE_GRANTED":
-                    // We received a vote!
                     if (term == currentTerm && currentState == State.CANDIDATE) {
                         voteCount++;
                         System.out.println("Received vote from " + senderAddress + ". Total votes: " + voteCount);
@@ -258,83 +280,94 @@ public class WhiteboardServer
         }
     }
 
-    /** Broadcasts a message to all connected peers. */
     private static void broadcastToPeers(String message) {
-        // System.out.println("Broadcasting: " + message);
         for (PrintWriter pw : peerWriters.values()) {
             pw.println(message);
         }
     }
 
-    /** Resets the election timer to a new random interval. */
-        private static synchronized void resetElectionTimer() 
-        {
-        // NEW: Cancel the *previous* timer task, if it exists
-            if (currentTimerTask != null) {
-                currentTimerTask.cancel();
+    // --- NEW: Helper function to log and relay ---
+    /** This function is called ONLY by the LEADER to finalize a command. */
+    private static void logAndRelay(String message) {
+        // 1. Log it (sets the official order)
+        synchronized (messageLog) {
+            sequenceNumber++;
+            messageLog.add(message);
+            System.out.println("Seq: "+ sequenceNumber +" Relayed: " + message);
         }
         
-        // NEW: Create and store the *new* task
-            currentTimerTask = new TimerTask() {
-                @Override
-                public void run() {
-                    startElection(); // If the timer expires, start an election
+        // 2. Broadcast to local clients
+        broadcastToLocalClients(message);
+        
+        // 3. Replicate to all peers
+        broadcastToPeers(message);
+    }
+    
+    // --- NEW: Helper function to broadcast to clients ---
+    /** Broadcasts a message to all locally connected clients. */
+    private static void broadcastToLocalClients(String message) {
+        synchronized (clientWriters) {
+            for (PrintWriter pw : clientWriters) {
+                pw.println(message);
+            }
+        }
+    }
+
+    // --- Timer logic with fix ---
+    private static synchronized void resetElectionTimer() {
+        if (currentTimerTask != null) {
+            currentTimerTask.cancel();
+        }
+        currentTimerTask = new TimerTask() {
+            @Override
+            public void run() {
+                startElection();
             }
         };
-        
-        // CHANGED: Schedule the new task
-            timer.schedule(currentTimerTask, 
+        timer.schedule(currentTimerTask, 
             rand.nextInt(ELECTION_TIMEOUT_MAX - ELECTION_TIMEOUT_MIN) + ELECTION_TIMEOUT_MIN);
-        }
+    }
 
-    /** Transitions this server to a CANDIDATE and starts an election. */
     private static synchronized void startElection() {
-        if (currentState == State.LEADER) return; // Don't start if we are already leader
-
+        if (currentState == State.LEADER) return;
         currentState = State.CANDIDATE;
-        currentTerm++; // Start a new term
-        votedFor = myAddress; // Vote for ourself
-        voteCount = 1; // We have one vote (from ourself)
+        currentTerm++;
+        votedFor = myAddress;
+        voteCount = 1;
         System.out.println("Election timer expired. Starting new election for term " + currentTerm);
-
-        // Request votes from all peers
         broadcastToPeers("REQUEST_VOTE:" + currentTerm + ":" + myAddress);
-
-        // Start a new timer. If this one expires, we start *another* election.
         resetElectionTimer();
     }
 
-    /** Transitions this server to a LEADER. */
-   private static synchronized void becomeLeader() {
+    private static synchronized void becomeLeader() {
+        if (currentState == State.LEADER) return; // Fix: Don't re-become leader
+        
         System.out.println("BECAME LEADER for term " + currentTerm);
         currentState = State.LEADER;
         currentLeaderAddress = myAddress;
         
-        // NEW: Cancel any pending election timer
         if (currentTimerTask != null) {
             currentTimerTask.cancel();
         }
         
-        // Start sending heartbeats
         timer.scheduleAtFixedRate(new TimerTask() {
             @Override
             public void run() {
                 if (currentState == State.LEADER) {
                     broadcastToPeers("HEARTBEAT:" + currentTerm + ":" + myAddress);
                 } else {
-                    this.cancel(); // Stop sending if we are no longer leader
+                    this.cancel();
                 }
             }
-        }, 0, HEARTBEAT_INTERVAL); // Start immediately, then repeat
+        }, 0, HEARTBEAT_INTERVAL);
     }
 
-    /** Transitions this server to a FOLLOWER. */
     private static synchronized void becomeFollower(int newTerm, String newLeader) {
         System.out.println("Becoming Follower in term " + newTerm);
         currentState = State.FOLLOWER;
         currentTerm = newTerm;
         votedFor = null;
         currentLeaderAddress = newLeader;
-        resetElectionTimer(); // Start listening for heartbeats
+        resetElectionTimer();
     }
 }
